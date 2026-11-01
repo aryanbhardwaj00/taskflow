@@ -16,6 +16,7 @@ import (
 	"github.com/blockaryan/taskflow/internal/config"
 	"github.com/blockaryan/taskflow/internal/handler"
 	"github.com/blockaryan/taskflow/internal/infra"
+	"github.com/blockaryan/taskflow/internal/middleware"
 	"github.com/blockaryan/taskflow/internal/repository"
 	"github.com/blockaryan/taskflow/internal/service"
 )
@@ -34,43 +35,109 @@ func main() {
 	}
 	defer db.Close()
 
-	// 3. Initialize Repositories
+	// 3. Initialize Redis client
+	redisClient, err := infra.NewRedisClient(cfg.Redis)
+	if err != nil {
+		log.Fatalf("Failed to establish Redis connection: %v\n", err)
+	}
+	defer redisClient.Close()
+
+	// 4. Initialize Repositories (Data Access Layer)
 	userRepo := repository.NewPostgresUserRepository(db)
+	taskRepo := repository.NewPostgresTaskRepository(db)
 
-	// 4. Initialize Services
-	authService := service.NewAuthService(userRepo)
+	// 5. Initialize Services (Business Logic Layer)
+	authService := service.NewAuthService(userRepo, cfg.JWT)
+	taskService := service.NewTaskService(taskRepo)
 
-	// 5. Initialize Handlers
+	// 6. Initialize Handlers (Presentation Layer)
 	healthHandler := handler.NewHealthHandler()
 	authHandler := handler.NewAuthHandler(authService)
+	taskHandler := handler.NewTaskHandler(taskService)
 
-	// 6. Set Gin mode based on environment
+	// 7. Set Gin mode based on environment
 	if cfg.App.Env == "production" {
 		gin.SetMode(gin.ReleaseMode)
 	} else {
 		gin.SetMode(gin.DebugMode)
 	}
 
-	// 7. Initialize Gin router
+	// 8. Initialize Gin router
 	router := gin.New()
 	router.Use(gin.Logger())
 	router.Use(gin.Recovery())
 
-	// 8. Register Routes
+	// 9. Register Routes
 	router.GET("/health", healthHandler.HealthCheck)
 
 	v1 := router.Group("/api/v1")
 	{
 		v1.GET("/health", healthHandler.HealthCheck)
 
-		// Auth routes group
+		// Verification route to test Redis in action
+		v1.GET("/redis-test", func(c *gin.Context) {
+			ctx := c.Request.Context()
+			key := "test:greeting"
+
+			// Set a test key with 60-second TTL
+			if err := redisClient.Set(ctx, key, "Hello from Redis!", 60*time.Second); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to set Redis key", "details": err.Error()})
+				return
+			}
+
+			// Read back the key
+			val, err := redisClient.Get(ctx, key)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get Redis key", "details": err.Error()})
+				return
+			}
+
+			c.JSON(http.StatusOK, gin.H{
+				"message": "Redis is operational",
+				"key":     key,
+				"value":   val,
+				"ttl":     "60s",
+			})
+		})
+
+		// Public Auth routes
 		auth := v1.Group("/auth")
 		{
 			auth.POST("/register", authHandler.Register)
+			auth.POST("/login", authHandler.Login)
+		}
+
+		// Protected routes (Require valid JWT)
+		protected := v1.Group("")
+		protected.Use(middleware.AuthMiddleware(authService))
+		{
+			protected.GET("/auth/me", authHandler.Me)
+
+			// Task Management routes
+			tasks := protected.Group("/tasks")
+			{
+				tasks.POST("", taskHandler.Create)
+				tasks.GET("", taskHandler.List)
+				tasks.GET("/:id", taskHandler.Get)
+				tasks.PATCH("/:id/status", taskHandler.UpdateStatus)
+				tasks.DELETE("/:id", taskHandler.Delete)
+			}
+
+			// Admin-only routes
+			admin := protected.Group("/admin")
+			admin.Use(middleware.RequireRoles("admin"))
+			{
+				admin.GET("/stats", func(c *gin.Context) {
+					c.JSON(http.StatusOK, gin.H{
+						"status":  "success",
+						"message": "Welcome to the Admin Portal",
+					})
+				})
+			}
 		}
 	}
 
-	// 9. Configure http.Server using values from config
+	// 10. Configure http.Server using values from config
 	serverAddr := fmt.Sprintf(":%s", cfg.App.Port)
 	srv := &http.Server{
 		Addr:         serverAddr,
@@ -80,7 +147,7 @@ func main() {
 		IdleTimeout:  cfg.App.IdleTimeout,
 	}
 
-	// 10. Start server in a background goroutine
+	// 11. Start server in a background goroutine
 	go func() {
 		log.Printf("Server listening on port %s in %s mode", cfg.App.Port, cfg.App.Env)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -88,7 +155,7 @@ func main() {
 		}
 	}()
 
-	// 11. Graceful shutdown listening for OS signals
+	// 12. Graceful shutdown listening for OS signals
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
