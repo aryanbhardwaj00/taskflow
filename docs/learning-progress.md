@@ -18,10 +18,10 @@ This document tracks our roadmap, current status, manual implementations complet
 | **Phase 7** | JWT validation & authentication middleware | 🟢 Completed | Gin Auth middleware, `c.Set`/`c.Get`, error handling | Token tampering, signature verification, `c.Abort()` vs `c.Next()`, context scoping |
 | **Phase 8** | Protected APIs & role-based authorization | 🟢 Completed | Task CRUD operations, ownership verification, RBAC middleware | Authentication vs Authorization, RBAC design, 401 vs 403, IDOR defense |
 | **Phase 9** | Redis installation, connection & basic ops | 🟢 Completed | Redis client initialization, ping/healthcheck, basic operations | Redis architecture, in-memory storage vs disk, data types, TTL & expiration |
-| **Phase 10** | Redis caching & cache invalidation | 🟡 In Progress | Cache-aside pattern, cache invalidation, JSON serialization | Cache-aside, cache penetration, breakdown, stampede, TTL strategies |
-| **Phase 11** | Rate limiting using Redis | ⚪ Pending | Token bucket / Fixed window rate limiter middleware | DoS mitigation, 429 Too Many Requests, distributed rate limiting |
-| **Phase 12** | Refresh token handling & rotation | ⚪ Pending | Refresh token generation, storage & rotation | Short-lived vs long-lived tokens, token revocation, replay attacks |
-| **Phase 13** | Unit tests & mocks | ⚪ Pending | Table-driven tests, `testify/mock` implementations | Unit vs Integration testing, mocking best practices |
+| **Phase 10** | Redis caching & cache invalidation | 🟢 Completed | Cache-aside pattern, cache invalidation, JSON serialization | Cache-aside, cache penetration, breakdown, stampede, TTL strategies |
+| **Phase 11** | Rate limiting using Redis | 🟢 Completed | Token bucket / Fixed window rate limiter middleware | DoS mitigation, 429 Too Many Requests, distributed rate limiting, Fail-Open |
+| **Phase 12** | Refresh token handling & rotation | 🟢 Completed | Refresh token generation, storage & rotation | Short-lived vs long-lived tokens, token revocation, replay attacks, session theft, idempotent logout |
+| **Phase 13** | Unit tests & mocks | 🟡 In Progress | Table-driven tests, `testify/mock` implementations | Unit vs Integration testing, mocking best practices, test coverage |
 | **Phase 14** | Integration tests | ⚪ Pending | Test environment setup, real DB & Redis tests | Test isolation, rollback strategies, dockerized test DBs |
 | **Phase 15** | Dockerfile & Docker Compose | ⚪ Pending | Multi-stage Dockerfile, compose service definitions | Container optimization, non-root users, layer caching |
 | **Phase 16** | Logging, monitoring & structured error handling | ⚪ Pending | Structured logger (slog/zap), custom error types | Distributed tracing, log levels, centralized error unwrapping |
@@ -42,3 +42,6 @@ This document tracks our roadmap, current status, manual implementations complet
 - *Phase 7 completed on:* 2026-11-01 (Gin Authentication middleware, header parsing `Bearer <token>`, signature verification, `c.Set`/`c.Get` context propagation, protected `/auth/me` endpoint verified)
 - *Phase 8 completed on:* 2026-11-01 (Task CRUD endpoints, IDOR ownership-enforced SQL queries, pagination safeguards, and `RequireRoles` RBAC middleware returning 403 Forbidden)
 - *Phase 9 completed on:* 2026-11-01 (Redis container setup, `go-redis/v9` client initialization with connection pooling, ping healthcheck, key/TTL verification)
+- *Phase 10 completed on:* 2026-11-01 (Cache-Aside pattern in `taskService`, graceful Redis degradation, JSON serialization, cache invalidation on update/delete)
+- *Phase 11 completed on:* 2026-11-01 (Distributed Redis Rate Limiter middleware, atomic `INCR`/`EXPIRE`, fail-open architecture, HTTP 429 throttling and standard RFC response headers)
+- *Phase 12 completed on:* 2026-11-02 (Dual-token pattern, 15m access token, 7d Redis refresh token, Refresh Token Rotation, replay attack detection, idempotent logout)

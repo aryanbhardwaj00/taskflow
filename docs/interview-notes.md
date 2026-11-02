@@ -65,28 +65,51 @@ This document contains curated interview questions, practical design questions, 
 
 ## Phase 8: Object-Level Authorization (IDOR) & RBAC
 
-#### Q1: What is the difference between HTTP 401 Unauthorized and HTTP 403 Forbidden?
-- **Answer:** `401 Unauthorized` means authentication failed (identity is unknown). `403 Forbidden` means identity is verified, but permissions/role are insufficient.
-
-#### Q2: What is an IDOR vulnerability and how do you prevent it in SQL?
+#### Q1: What is an IDOR vulnerability and how do you prevent it in SQL?
 - **Answer:** Attackers guessing IDs to tamper with other users' resources. We prevent it by enforcing ownership in the SQL query: `WHERE id = $1 AND user_id = $2`.
 
 ---
 
 ## Phase 9: Redis Architecture & In-Memory Operations
 
-### 1. Basic Interview Questions
-
 #### Q1: What is Redis and how does its architecture differ from PostgreSQL?
+- **Answer:** Redis is an in-memory (RAM) key-value store ($<1\text{ms}$ latency); PostgreSQL is a disk/SSD-backed relational database (5-50ms latency). Redis handles volatile caches and transient counters; PostgreSQL is the durable single source of truth.
+
+---
+
+## Phase 10: Caching Strategies & The Cache-Aside Pattern
+
+#### Q1: Why should you DELETE the cache instead of updating it when data changes?
+- **Answer:** To prevent concurrency race conditions where an older write overrides a newer write in Redis due to network packet reordering. Deleting the cache key (`DEL key`) ensures the next read queries the freshest authoritative record from PostgreSQL.
+
+---
+
+## Phase 11: Distributed Rate Limiting & Denial of Service Defense
+
+#### Q1: Why must rate limiting be distributed using Redis in containerized backends?
+- **Answer:** In modern microservice architectures with multiple container instances behind a load balancer, in-memory rate limiters allow attackers to multiply their request budget. Redis provides a centralized, thread-safe, atomic counter across all instances.
+
+---
+
+## Phase 12: Dual-Token Architecture, Refresh Token Rotation & Session Revocation
+
+### 1. Core Authentication Architecture Questions
+
+#### Q1: Why is a single long-lived JWT a security disaster in production?
+- **Answer:** JWTs are stateless. The server verifies them exclusively via cryptographic signatures without consulting a database. If an attacker intercepts a 30-day JWT, they have 30 days of unrestricted access, and the server has **no mechanism to revoke or invalidate** the token.
+
+#### Q2: How does the Dual-Token (Access + Refresh) pattern solve this?
 - **Answer:**
-  - **Storage:** Redis is an in-memory (RAM) key-value store; PostgreSQL is a disk/SSD-backed relational database.
-  - **Latency:** Redis operations execute in sub-millisecond time ($100-500\mu\text{s}$), whereas PostgreSQL queries require 5-50ms due to disk I/O, locks, and indexing overhead.
-  - **Durability:** PostgreSQL guarantees strict ACID durability. Redis is primarily used for volatile, disposable data (caches, rate limiters, session stores).
+  - **Access Token:** Very short-lived (15 minutes). Stateless. Sent with every API call. If intercepted, the exposure window is minimal.
+  - **Refresh Token:** Long-lived (7 days). Stateful. Stored in Redis. Sent *only* to `/auth/refresh` when the access token expires. Can be revoked immediately by deleting the Redis key (`DEL refreshtoken:<token>`).
 
-#### Q2: What is `redis.Nil` in the `go-redis` library? Why is it not a true system error?
-- **Answer:** When calling `rdb.Get(ctx, key)` for a key that does not exist or has expired, Redis returns `(nil)`. The `go-redis` library returns this as `redis.Nil`. In application code, `errors.Is(err, redis.Nil)` represents a **Cache Miss**, which is normal operating behavior indicating we should fall back to PostgreSQL. It must not be treated as a database failure or internal 500 error.
+#### Q3: What is Refresh Token Rotation (RTR) and what attack does it detect?
+- **Answer:**
+  - **How It Works:** Every time `/auth/refresh` is called, the server invalidates the used refresh token and issues a brand-new access token AND a brand-new refresh token. Each refresh token is strictly single-use.
+  - **Attack Detected:** **Replay Attacks / Token Theft**. If an attacker steals a refresh token and uses it, the legitimate user will eventually attempt to use the same token. When the server detects an attempt to use an already-invalidated token, it flags a security breach and revokes all active sessions for that user.
 
-#### Q3: How does TTL (Time-To-Live) work in Redis?
-- **Answer:** Every key can have an associated expiration duration. Redis tracks this using passive and active eviction:
-  - **Passive Eviction:** When a client accesses an expired key, Redis detects it has expired, deletes it, and returns `(nil)`.
-  - **Active Eviction:** Periodically, Redis samples keys in the background and cleans up expired ones so dead memory is reclaimed even if the key is never read again.
+#### Q4: Why is Logout implemented as an Idempotent operation?
+- **Answer:**
+  - An operation is idempotent if executing it multiple times produces the exact same end state ($f(f(x)) = f(x)$).
+  - When a user logs out, their goal is to ensure their session is terminated. If a network retry or accidental double-click sends two logout requests, returning `400` or `401` on the second request alarms the user into thinking logout failed.
+  - Furthermore, returning `200 OK` regardless of whether the token was already deleted prevents attackers from using the logout endpoint to test if a given token string is active.

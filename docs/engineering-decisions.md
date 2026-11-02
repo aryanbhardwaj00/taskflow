@@ -29,7 +29,7 @@ Every entry follows this standardized format:
 ## ADR-001: Layered Clean Architecture & Standard Go Project Layout
 
 - **Category:** Architectural Decision
-- **Problem / Context:** We need a maintainable, testable, and idiomatic codebase structure for a task management REST API that supports PostgreSQL, Redis caching, JWT auth, and clean dependency injection.
+- **Problem / Context:** Maintainable, testable, and idiomatic codebase structure for a task management REST API with PostgreSQL, Redis, and clean dependency injection.
 - **Selected Solution:** Layered Clean Architecture within standard Go layout (`cmd/api`, `internal/...`).
 
 ---
@@ -37,16 +37,16 @@ Every entry follows this standardized format:
 ## ADR-002: Graceful Shutdown and Custom http.Server Timeouts
 
 - **Category:** Architectural Decision
-- **Problem / Context:** Standard `router.Run(":8080")` abruptly kills in-flight connections on container redeployment and lacks network I/O timeouts, making the server vulnerable to resource exhaustion.
-- **Selected Solution:** Configured custom `&http.Server` with `ReadTimeout: 10s`, `WriteTimeout: 10s`, `IdleTimeout: 60s`, executed `srv.ListenAndServe()` in a separate goroutine, and captured `SIGINT`/`SIGTERM` via `signal.Notify` to trigger `srv.Shutdown(ctx)` with a 5-second deadline.
+- **Problem / Context:** Prevent dropped in-flight connections on container redeployment and protect against connection leaks (Slowloris).
+- **Selected Solution:** Configured custom `&http.Server` with explicit read/write/idle timeouts and captured `SIGINT`/`SIGTERM` via `signal.Notify` for graceful 5s shutdown.
 
 ---
 
 ## ADR-003: 12-Factor App Environment Configuration & Fail-Fast Validation
 
 - **Category:** Architectural Decision
-- **Problem / Context:** Applications need portable configuration across local development, CI pipelines, and production container environments without rebuilding code or checking secrets into version control.
-- **Selected Solution:** Implemented `internal/config/config.go` with grouped structs (`App`, `DB`, `Redis`, `JWT`), `godotenv.Load()` with graceful fallback for production containers, `os.LookupEnv()` with defaults, and a `Validate()` method that prevents booting in production with weak secrets.
+- **Problem / Context:** Portable configuration across dev, CI, and containers without hardcoded secrets.
+- **Selected Solution:** Implemented `internal/config/config.go` with grouped structs, `.env` loading, and startup fail-fast validation.
 
 ---
 
@@ -61,46 +61,76 @@ Every entry follows this standardized format:
 ## ADR-005: Bcrypt Password Hashing with Work Factor Tuning & DTO Protection
 
 - **Category:** Architectural Decision
-- **Problem / Context:** User passwords must be stored securely to prevent credential recovery in the event of a database breach or unauthorized dump.
-- **Selected Solution:** Selected bcrypt with `DefaultCost` (10). Enforced `json:"-"` struct tag on `model.User.PasswordHash`, normalized email inputs, and separated database models from API DTOs.
+- **Problem / Context:** User passwords must be stored securely to prevent credential recovery in case of data breaches.
+- **Selected Solution:** Selected bcrypt with `DefaultCost` (10), enforced `json:"-"` struct tag on `model.User.PasswordHash`, and separated database models from API DTOs.
 
 ---
 
 ## ADR-006: JWT Signing (HS256) & Explicit Algorithm Verification
 
 - **Category:** Architectural Decision
-- **Problem / Context:** Need stateless, horizontal-scaling authentication for API endpoints without querying the database on every single incoming HTTP request.
-- **Selected Solution:** Implemented HS256 JWT access tokens with embedded `UserClaims` (`UserID`, `Email`, `Role`, `ExpiresAt`). In `ValidateToken`, explicitly enforced `token.Method.(*jwt.SigningMethodHMAC)` type assertion before evaluating the signature.
+- **Problem / Context:** Stateless, horizontal-scaling authentication without querying the database on every HTTP request.
+- **Selected Solution:** Implemented HS256 JWT access tokens with embedded `UserClaims` and enforced `token.Method.(*jwt.SigningMethodHMAC)` type assertion before evaluating the signature.
 
 ---
 
 ## ADR-007: Gin Middleware Interceptor Pattern & Context-Scoped Identity
 
 - **Category:** Architectural Decision
-- **Problem / Context:** Handlers require verified user identity without duplicating JWT parsing or allowing unauthorized requests to invoke business handlers.
-- **Selected Solution:** Created `AuthMiddleware` checking `Authorization: Bearer <token>`, validating claims, and binding `userID`, `userEmail`, and `userRole` into `gin.Context`. Implemented type-safe helper functions (`GetUserID`, `GetUserRole`) for handlers.
+- **Problem / Context:** Handlers require verified user identity without duplicating JWT parsing.
+- **Selected Solution:** Created `AuthMiddleware` checking `Authorization: Bearer <token>`, validating claims, and binding `userID`, `userEmail`, and `userRole` into `gin.Context`.
 
 ---
 
 ## ADR-008: Object-Level Authorization (IDOR Defense) & Role-Based Access Control (RBAC)
 
 - **Category:** Architectural Decision
-- **Problem / Context:** Attackers could manipulate task IDs to read, update, or delete other users' tasks (Insecure Direct Object Reference - IDOR). Administrative endpoints must be restricted to authorized roles.
-- **Selected Solution:** Enforced object ownership at the SQL query level (`WHERE id = $1 AND user_id = $2`) and evaluated `tag.RowsAffected() == 0` to return `ErrTaskNotFound`. Implemented `RequireRoles` middleware for route-level RBAC returning `HTTP 403 Forbidden`.
+- **Problem / Context:** Prevent users from tampering with other users' tasks via URL manipulation (IDOR). Enforce administrative privileges.
+- **Selected Solution:** Enforced object ownership in SQL queries (`WHERE id = $1 AND user_id = $2`) with `tag.RowsAffected() == 0` checking. Implemented `RequireRoles` middleware for route-level RBAC returning `HTTP 403 Forbidden`.
 
 ---
 
 ## ADR-009: In-Memory Redis Client Initialization & Host Port Mapping
 
 - **Category:** Actually Encountered & Architectural Decision
-- **Problem / Context:** 
-  1. Default Redis port `6379` was already bound on the host machine.
-  2. Need an in-memory caching and transient state client with bounded connection pooling and fail-fast startup connectivity check.
+- **Problem / Context:** Host port `6379` already in use; need an in-memory caching client with connection pooling and startup connectivity check.
+- **Selected Solution:** Mapped host port `6378:6379` in `docker-compose.yml`, matched `REDIS_PORT=6378` in `.env`, and initialized `internal/infra/redis.go` with `PoolSize: 20` and immediate `rdb.Ping(ctx)`.
+
+---
+
+## ADR-010: Cache-Aside Caching Strategy & Invalidation via Deletion
+
+- **Category:** Architectural Decision
+- **Problem / Context:** High database read load on frequent task lookups; risks of stale or inconsistent cache data when tasks are updated or deleted.
+- **Selected Solution:** Implemented the Cache-Aside pattern in `internal/service/task_service.go`: Read from Redis $\rightarrow$ on miss query PostgreSQL and populate Redis with TTL. On update/delete, update PostgreSQL first and immediately delete (`DEL`) the Redis key. Gracefully degraded if Redis is unreachable.
+
+---
+
+## ADR-011: Distributed Redis Rate Limiting & Fail-Open Throttling
+
+- **Category:** Architectural Decision
+- **Problem / Context:** Protecting public endpoints (login/register) from brute-force password guessing and preventing API resource exhaustion across distributed server instances.
+- **Selected Solution:** Implemented `RateLimiter` middleware in `internal/middleware/rate_limit_middleware.go` using Redis `INCR` and `EXPIRE` grouped by time buckets (`unixTime / windowSec`). Identifies clients by `userID` (authenticated) or `ClientIP` (unauthenticated). Enforces "Fail Open" (logs warning and permits traffic if Redis blips). Sets standard headers (`X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`, `Retry-After`).
+
+---
+
+## ADR-012: Refresh Token Rotation (RTR), State Invalidation & Idempotent Logout
+
+- **Category:** Actually Encountered & Architectural Decision
+- **Problem / Context:**
+  1. Stateless JWT access tokens cannot be revoked if stolen, but forcing users to re-login frequently hurts UX.
+  2. Logout endpoint returned `200 OK` even when passed an already-deleted or tampered refresh token.
 - **Root Cause / Why It Matters:**
-  - Running a container on a port already bound by a local service causes Docker startup network collision.
-  - Creating a Redis client lazily without pinging can lead to runtime crashes under traffic if credentials or network reachability fail.
-- **Selected Solution:** 
-  - Mapped host port `6378:6379` in `docker-compose.yml` and matched `REDIS_PORT=6378` in `.env`.
-  - Implemented `internal/infra/redis.go` using `go-redis/v9` with `PoolSize: 20`, `MinIdleConns: 5`, and an immediate `rdb.Ping(ctx)` on startup.
-- **Why We Selected It:** Prevents local development port collisions and guarantees that Redis connectivity is verified before accepting HTTP traffic.
-- **Verification / Testing:** Tested `GET /api/v1/redis-test`, verified key storage and 60-second TTL via `redis-cli ttl test:greeting`.
+  - Simple JWTs force an unacceptable compromise between security (short TTL) and user convenience (long TTL).
+  - Redis `DEL key` returns `0` if the key does not exist, with `err == nil`.
+- **How We Identified It:** Manual Postman testing of `POST /auth/logout` with reused and invalid tokens.
+- **Alternatives Considered:**
+  1. **Strict Session Verification on Logout:** Return `400 Bad Request` or `401 Unauthorized` if Redis returns 0 deleted keys.
+     - *Cons:* Confusing user experience (user clicked logout and wants confirmation of being logged out; showing an error makes them think they are still logged in); leaks token validity information to attackers.
+  2. **Idempotent Logout (Selected):** Always return `200 OK` regardless of whether the key existed.
+- **Selected Solution:**
+  - Dual-token architecture: Short-lived stateless access token (15m) + Long-lived stateful refresh token (7 days in Redis).
+  - Implemented **Refresh Token Rotation (RTR)**: Every `/auth/refresh` call deletes the old token and issues a brand-new pair. Replay attempts indicate token theft and return `401`.
+  - Kept `Logout` strictly **idempotent**: The target state ("session is invalid") is guaranteed.
+- **Why We Selected It:** Provides resilient client retry semantics, avoids frustrating error prompts on user logout, and prevents token probing reconnaissance.
+- **Verification / Testing:** Tested token refresh issuing new pairs, verified that presenting the old rotated token returns `401 Unauthorized`, and verified Redis key cleanup.

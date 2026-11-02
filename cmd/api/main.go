@@ -47,8 +47,8 @@ func main() {
 	taskRepo := repository.NewPostgresTaskRepository(db)
 
 	// 5. Initialize Services (Business Logic Layer)
-	authService := service.NewAuthService(userRepo, cfg.JWT)
-	taskService := service.NewTaskService(taskRepo)
+	authService := service.NewAuthService(userRepo, cfg.JWT, redisClient)
+	taskService := service.NewTaskService(taskRepo, redisClient)
 
 	// 6. Initialize Handlers (Presentation Layer)
 	healthHandler := handler.NewHealthHandler()
@@ -102,14 +102,18 @@ func main() {
 
 		// Public Auth routes
 		auth := v1.Group("/auth")
+		auth.Use(middleware.RateLimiter(redisClient, 5, 1*time.Minute))
 		{
 			auth.POST("/register", authHandler.Register)
 			auth.POST("/login", authHandler.Login)
+			auth.POST("/refresh", authHandler.Refresh)
+			auth.POST("/logout", authHandler.Logout)
 		}
 
 		// Protected routes (Require valid JWT)
 		protected := v1.Group("")
 		protected.Use(middleware.AuthMiddleware(authService))
+		protected.Use(middleware.RateLimiter(redisClient, 10, 1*time.Minute))
 		{
 			protected.GET("/auth/me", authHandler.Me)
 
