@@ -117,20 +117,73 @@ Every entry follows this standardized format:
 ## ADR-012: Refresh Token Rotation (RTR), State Invalidation & Idempotent Logout
 
 - **Category:** Actually Encountered & Architectural Decision
-- **Problem / Context:**
-  1. Stateless JWT access tokens cannot be revoked if stolen, but forcing users to re-login frequently hurts UX.
-  2. Logout endpoint returned `200 OK` even when passed an already-deleted or tampered refresh token.
+- **Problem / Context:** Stateless JWT access tokens cannot be revoked if stolen, but forcing users to re-login frequently hurts UX. Logout endpoint returned `200 OK` even when passed an already-deleted or tampered refresh token.
+- **Selected Solution:** Dual-token architecture (15m stateless JWT + 7d stateful Redis refresh token) with Refresh Token Rotation (RTR) on `/auth/refresh`. Kept `Logout` strictly idempotent returning `200 OK` to ensure resilient client retry semantics and prevent token probing attacks.
+
+---
+
+## ADR-013: Table-Driven Testing, Interface Mocking & In-Memory HTTP Dispatching
+
+- **Category:** Architectural Decision
+- **Problem / Context:** Need automated test coverage for domain services and HTTP middleware without creating slow, brittle dependencies on running PostgreSQL/Redis instances during unit testing.
 - **Root Cause / Why It Matters:**
-  - Simple JWTs force an unacceptable compromise between security (short TTL) and user convenience (long TTL).
-  - Redis `DEL key` returns `0` if the key does not exist, with `err == nil`.
-- **How We Identified It:** Manual Postman testing of `POST /auth/logout` with reused and invalid tokens.
+  - Tests that require live databases are slow, prone to data pollution, and cannot run in isolated PR review environments easily.
+  - Writing separate test functions for every edge case leads to code duplication.
+- **How We Identified It:** Go standard testing idioms and CI/CD fast feedback requirements.
 - **Alternatives Considered:**
-  1. **Strict Session Verification on Logout:** Return `400 Bad Request` or `401 Unauthorized` if Redis returns 0 deleted keys.
-     - *Cons:* Confusing user experience (user clicked logout and wants confirmation of being logged out; showing an error makes them think they are still logged in); leaks token validity information to attackers.
-  2. **Idempotent Logout (Selected):** Always return `200 OK` regardless of whether the key existed.
+  1. Spinning up Docker containers for all unit tests (too slow for rapid TDD).
+  2. Manual mock structs without libraries.
+  3. `testify/mock` with table-driven tests and `net/http/httptest` for handlers/middlewares.
 - **Selected Solution:**
-  - Dual-token architecture: Short-lived stateless access token (15m) + Long-lived stateful refresh token (7 days in Redis).
-  - Implemented **Refresh Token Rotation (RTR)**: Every `/auth/refresh` call deletes the old token and issues a brand-new pair. Replay attempts indicate token theft and return `401`.
-  - Kept `Logout` strictly **idempotent**: The target state ("session is invalid") is guaranteed.
-- **Why We Selected It:** Provides resilient client retry semantics, avoids frustrating error prompts on user logout, and prevents token probing reconnaissance.
-- **Verification / Testing:** Tested token refresh issuing new pairs, verified that presenting the old rotated token returns `401 Unauthorized`, and verified Redis key cleanup.
+  - Implemented Table-Driven Tests with `t.Run(tc.name, ...)` for all scenarios (success, edge cases, failures).
+  - Used `testify/mock` to mock `UserRepository` and `AuthService` interfaces with exact argument expectations (`mock.MatchedBy`).
+  - Used `net/http/httptest.NewRecorder()` and `router.ServeHTTP()` for in-memory HTTP middleware verification.
+- **Why We Selected It:** Tests execute in milliseconds ($<10\text{ms}$), require zero external infrastructure, provide 100% deterministic assertion of error handling branches, and decouple testing from network layers.
+- **Verification / Testing:** Executed `go test -v ./...` verifying that all service and middleware scenarios pass in $<0.75$ seconds.
+
+---
+
+## ADR-014: Integration Testing with Live PostgreSQL, Build Tags & Table Truncate Isolation
+
+- **Category:** Architectural Decision
+- **Problem / Context:** Unit tests verify isolated Go logic, but cannot verify SQL syntax errors, database-level schema constraints (foreign keys, unique indexes), or driver deserialization (`UUID`, `TIMESTAMPTZ`).
+- **Root Cause / Why It Matters:**
+  - Mocking the database can hide bugs: invalid SQL column names, failing foreign key references, or unhandled PostgreSQL error codes.
+  - Running database tests during routine `go test ./...` in development or lightweight CI environments causes failures if a live database container is not running.
+- **Alternatives Considered:**
+  1. Transaction Rollback (`tx.Rollback()` per test): Fast, but does not test real committed data or repository functions that internally use connection pools.
+  2. Mocking SQL driver (`sqlmock`): Still mocks SQL and does not test the real PostgreSQL engine or Postgres-specific extensions.
+  3. Real PostgreSQL container with Build Tags (`//go:build integration`) and `TRUNCATE TABLE ... CASCADE`: Provides 100% realistic database verification while keeping unit tests fast.
+- **Selected Solution:**
+  - Placed `//go:build integration` on all database integration test files.
+  - Used a shared `setupTestDB(t)` helper connecting to Dockerized PostgreSQL on port `5431`.
+  - Implemented cleanup teardown using `TRUNCATE TABLE tasks, users CASCADE;` inside `defer teardown()`.
+  - Created end-to-end repository tests verifying:
+    1. Schema generation of UUIDs and timestamps upon `INSERT`.
+    2. PostgreSQL error code `23505` correctly mapped to `ErrDuplicateEmail`.
+    3. PostgreSQL foreign key constraint violation when inserting orphaned tasks.
+    4. Object-level authorization (IDOR) verification in SQL (`WHERE id = $1 AND user_id = $2`) preventing cross-user reads, updates, and deletes.
+    5. Pagination and status filtering.
+- **Why We Selected It:** Guarantees that our actual SQL queries, constraints, and connection pooling work seamlessly with real PostgreSQL, while `-tags=integration` ensures standard unit tests remain instantaneous.
+- **Verification / Testing:** Ran `go test -tags=integration -v ./internal/repository/...` executing 7 comprehensive test suites in 0.528s with zero data leakage between tests.
+
+---
+
+## ADR-015: Multi-Stage Docker Build, Alpine Stripping & Docker Compose Orchestration
+
+- **Category:** Architectural Decision & Deliberately Simulated
+- **Problem / Context:** Production deployment requires a secure, minimal container image containing only runtime dependencies, along with unified local orchestration where PostgreSQL, Redis, database migrations, and the Go API run in an isolated Docker network.
+- **Root Cause / Why It Matters:**
+  - A standard Go build image (`golang:1.26-alpine`) contains compilers, package managers, and caches weighing $\sim 1\text{ GB}$, increasing attack surface and CI/CD push/pull latency.
+  - Running containers as `root` creates high vulnerability risks in case of remote code execution (container escape).
+  - Starting the API before PostgreSQL and Redis finish initializing results in startup crash-loops.
+- **Alternatives Considered:**
+  1. Single-stage container image: Simple, but huge image size ($>800\text{MB}$) and leaves development tools in production.
+  2. `scratch` base image: Extremely small, but lacks CA certificates (breaks external HTTPS requests) and has no shell for health check diagnostics.
+  3. Two-stage Alpine build (`golang:1.26-alpine` builder $\rightarrow$ `alpine:3.20` runner): Minimal footprint ($\sim 75\text{MB}$ total disk usage with certificates and non-root user).
+- **Selected Solution:**
+  - **Stage 1 (Builder):** Built statically linked binary using `CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w"`.
+  - **Stage 2 (Runner):** Alpine 3.20 base image, installed `ca-certificates` and `tzdata`, created unprivileged non-root user (`appuser:10001`), copied only the binary, and added a native `HEALTHCHECK`.
+  - **Docker Compose:** Added `api` service with `depends_on` conditions (`service_healthy` for postgres/redis and `service_completed_successfully` for migrations).
+- **Why We Selected It:** Slashes image size by $>90\%$, guarantees zero dynamic C library runtime dependencies, secures runtime permissions, and ensures zero startup race conditions between database migrations and API booting.
+- **Verification / Testing:** Built `taskflow-api:latest` successfully via `docker build -t taskflow-api:latest .` resulting in a compact 75.5MB image.

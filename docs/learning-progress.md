@@ -21,10 +21,10 @@ This document tracks our roadmap, current status, manual implementations complet
 | **Phase 10** | Redis caching & cache invalidation | 🟢 Completed | Cache-aside pattern, cache invalidation, JSON serialization | Cache-aside, cache penetration, breakdown, stampede, TTL strategies |
 | **Phase 11** | Rate limiting using Redis | 🟢 Completed | Token bucket / Fixed window rate limiter middleware | DoS mitigation, 429 Too Many Requests, distributed rate limiting, Fail-Open |
 | **Phase 12** | Refresh token handling & rotation | 🟢 Completed | Refresh token generation, storage & rotation | Short-lived vs long-lived tokens, token revocation, replay attacks, session theft, idempotent logout |
-| **Phase 13** | Unit tests & mocks | 🟡 In Progress | Table-driven tests, `testify/mock` implementations | Unit vs Integration testing, mocking best practices, test coverage |
-| **Phase 14** | Integration tests | ⚪ Pending | Test environment setup, real DB & Redis tests | Test isolation, rollback strategies, dockerized test DBs |
-| **Phase 15** | Dockerfile & Docker Compose | ⚪ Pending | Multi-stage Dockerfile, compose service definitions | Container optimization, non-root users, layer caching |
-| **Phase 16** | Logging, monitoring & structured error handling | ⚪ Pending | Structured logger (slog/zap), custom error types | Distributed tracing, log levels, centralized error unwrapping |
+| **Phase 13** | Unit tests & mocks | 🟢 Completed | Table-driven tests, `testify/mock` implementations | Unit vs Integration testing, mocking best practices, test coverage |
+| **Phase 14** | Integration tests | 🟢 Completed | Test environment setup, real DB & Redis tests | Test isolation, rollback strategies, dockerized test DBs |
+| **Phase 15** | Dockerfile & Docker Compose | 🟢 Completed | Multi-stage Dockerfile, compose service definitions | Container optimization, non-root users, layer caching |
+| **Phase 16** | Logging, monitoring & structured error handling | 🟡 In Progress | Structured logger (slog/zap), custom error types | Distributed tracing, log levels, centralized error unwrapping |
 | **Phase 17** | Performance optimization & concurrency | ⚪ Pending | Worker pools / goroutines for background tasks | Go runtime scheduler (GMP), goroutine leaks, channels vs sync.Mutex |
 | **Phase 18** | AWS deployment | ⚪ Pending | AWS configuration, container registry pushing | Cloud native deployments, VPC, ECS, RDS managed services |
 | **Phase 19** | CI/CD & Terraform | ⚪ Pending | GitHub Actions workflow, Terraform definitions | Infrastructure as Code, automated deployment pipelines |
@@ -45,3 +45,6 @@ This document tracks our roadmap, current status, manual implementations complet
 - *Phase 10 completed on:* 2026-11-01 (Cache-Aside pattern in `taskService`, graceful Redis degradation, JSON serialization, cache invalidation on update/delete)
 - *Phase 11 completed on:* 2026-11-01 (Distributed Redis Rate Limiter middleware, atomic `INCR`/`EXPIRE`, fail-open architecture, HTTP 429 throttling and standard RFC response headers)
 - *Phase 12 completed on:* 2026-11-02 (Dual-token pattern, 15m access token, 7d Redis refresh token, Refresh Token Rotation, replay attack detection, idempotent logout)
+- *Phase 13 completed on:* 2026-11-02 (Table-driven unit testing with `testify`, repository mocking via `mock.Mock`, in-memory HTTP middleware testing with `net/http/httptest.NewRecorder`)
+- *Phase 14 completed on:* 2026-11-02 (Live PostgreSQL integration testing with `//go:build integration`, `TRUNCATE TABLE` test isolation, UUID/timestamp scanning, real error mapping for unique violation `23505`, and IDOR SQL query enforcement)
+- *Phase 15 completed on:* 2026-11-02 (Multi-stage Dockerfile with `golang:1.26-alpine` and `alpine:3.20`, `CGO_ENABLED=0`, `-ldflags="-s -w"` stripping, non-root `appuser`, and unified `docker-compose.yml` with health-gated startup ordering)
