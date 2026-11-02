@@ -29,108 +29,161 @@ Every entry follows this standardized format:
 ## ADR-001: Layered Clean Architecture & Standard Go Project Layout
 
 - **Category:** Architectural Decision
-- **Problem / Context:** We need a maintainable, testable, and idiomatic codebase structure for a task management REST API that supports PostgreSQL, Redis caching, JWT auth, and clean dependency injection.
-- **Root Cause / Why It Matters:** 
-  Without a strict separation of concerns:
-  - Database queries get mingled with HTTP request decoding, making unit testing impossible without spinning up a real DB.
-  - Business logic depends directly on HTTP frameworks (Gin), locking the domain to HTTP transports.
-  - Circular dependencies easily occur in Go if packages are poorly separated.
-- **How We Identified It:** Standard backend best practice in production Go systems.
-- **Alternatives Considered:**
-  1. **Flat package structure:** Everything in `package main`.
-     - *Pros:* Simple for tiny micro-scripts.
-     - *Cons:* Becomes unmaintainable after 3-4 files; global variables and tight coupling.
-  2. **Package by feature (e.g., `pkg/users`, `pkg/tasks`):** Each package contains its own handler, service, repo.
-     - *Pros:* Colocates all logic for a single business capability.
-     - *Cons:* Can lead to cyclic import dependencies in Go when entities reference each other (e.g. Tasks referencing Users).
-  3. **Layered Clean Architecture (`internal/handler`, `internal/service`, `internal/repository`):**
-     - *Pros:* Clear unidirectional dependency flow (`Handler -> Service -> Repository`), zero circular imports, easy interface mocking with Go interfaces.
-     - *Cons:* Slightly more boilerplate (DTOs, interface definitions).
+- **Problem / Context:** Maintainable, testable, and idiomatic codebase structure for a task management REST API with PostgreSQL, Redis, and clean dependency injection.
 - **Selected Solution:** Layered Clean Architecture within standard Go layout (`cmd/api`, `internal/...`).
-- **Why We Selected It:** Unidirectional dependency graph maps naturally to Go. Go interfaces allow the service layer to define repository interfaces that it needs, enabling clean mock-based unit tests.
-- **Trade-offs:** Requires constructor-based dependency injection wiring in `main.go` and boundary data mapping (DTO to Domain Model).
-- **Verification / Testing:** Verified that `internal/` packages enforce package encapsulation and packages compile without circular dependencies.
 
 ---
 
 ## ADR-002: Graceful Shutdown and Custom http.Server Timeouts
 
 - **Category:** Architectural Decision
-- **Problem / Context:** Standard `router.Run(":8080")` abruptly kills in-flight connections on container redeployment and lacks network I/O timeouts, making the server vulnerable to resource exhaustion.
-- **Root Cause / Why It Matters:**
-  1. **Slowloris Attacks / Leaked Connections:** Default `http.Server` has 0 timeouts (`ReadTimeout` and `WriteTimeout`). Clients that open connections and trickle data slowly keep server goroutines and file descriptors open indefinitely.
-  2. **Abrupt Process Termination:** When Docker or Kubernetes restarts or terminates a container, it sends `SIGTERM`. If the process immediately terminates, active database operations and HTTP responses are aborted, resulting in HTTP 502/504 errors for end users.
-- **How We Identified It:** Standard production microservice design pattern.
-- **Alternatives Considered:**
-  1. **`router.Run(":8080")`:** Simplest Gin shortcut, but ignores OS signals and sets no HTTP timeouts.
-  2. **Standard `http.Server` with signal trapping and `srv.Shutdown(ctx)`:**
-- **Selected Solution:** Configured custom `&http.Server` with `ReadTimeout: 10s`, `WriteTimeout: 10s`, `IdleTimeout: 60s`, executed `srv.ListenAndServe()` in a separate goroutine, and captured `SIGINT`/`SIGTERM` via `signal.Notify` to trigger `srv.Shutdown(ctx)` with a 5-second deadline.
-- **Why We Selected It:** Guarantees zero dropped in-flight requests during rolling deployments and protects the service against idle or slow-read connection leaks.
-- **Trade-offs:** Slightly more boilerplate code in `main.go`.
-- **Verification / Testing:** Tested running the server binary, issuing `curl` requests, and sending `SIGINT` (Ctrl+C). Verified terminal logs confirm `"Initiating graceful shutdown..."` and `"Server exiting successfully."` without errors.
+- **Problem / Context:** Prevent dropped in-flight connections on container redeployment and protect against connection leaks (Slowloris).
+- **Selected Solution:** Configured custom `&http.Server` with explicit read/write/idle timeouts and captured `SIGINT`/`SIGTERM` via `signal.Notify` for graceful 5s shutdown.
 
 ---
 
 ## ADR-003: 12-Factor App Environment Configuration & Fail-Fast Validation
 
 - **Category:** Architectural Decision
-- **Problem / Context:** Applications need portable configuration across local development, CI pipelines, and production container environments without rebuilding code or checking secrets into version control.
-- **Root Cause / Why It Matters:**
-  - Hardcoded configuration requires recompilation per environment.
-  - Storing `.env` in Git risks critical credential leaks.
-  - Silent configuration defaults for security keys (like JWT secret) can lead to insecure production deployments.
-- **How We Identified It:** The Twelve-Factor App methodology (Factor III: Config).
-- **Alternatives Considered:**
-  1. **JSON/YAML config files (`config.yaml`):** Flexible, but requires mounting files into containers and risk accidental commit of secret files.
-  2. **Direct `os.Getenv()` calls scattered across packages:** Difficult to audit, no validation, prone to typos.
-  3. **Centralized strongly typed `Config` struct with optional `.env` loading and startup validation:**
-- **Selected Solution:** Implemented `internal/config/config.go` with grouped structs (`App`, `DB`, `Redis`, `JWT`), `godotenv.Load()` with graceful fallback for production containers, `os.LookupEnv()` with defaults, and a `Validate()` method that prevents booting in production with weak secrets.
-- **Why We Selected It:** Guarantees centralized type safety, fails fast at startup if critical keys are missing/weak, and simplifies dependency injection.
-- **Trade-offs:** Must maintain `.env.example` as new services are introduced.
-- **Verification / Testing:** Verified port overrides via `.env` and environment variables (`HTTP_PORT=9090 ./bin/api`). Verified that missing `.env` does not crash the app.
+- **Problem / Context:** Portable configuration across dev, CI, and containers without hardcoded secrets.
+- **Selected Solution:** Implemented `internal/config/config.go` with grouped structs, `.env` loading, and startup fail-fast validation.
 
 ---
 
 ## ADR-004: PostgreSQL Connection Pool Tuning & Docker Volume Initialization Gotchas
 
 - **Category:** Actually Encountered
-- **Problem / Context:**
-  1. Port conflict on host port `5432` during Docker startup.
-  2. Database `taskflow_db` reported missing (`SQLSTATE 3D000`) despite being declared in `docker-compose.yml`.
-  3. Nil pointer dereference panic in `defer db.Close()` when connection failed.
-  4. Authentication error (`SQLSTATE 28P01`) after updating `POSTGRES_PASSWORD` in `docker-compose.yml`.
-- **Root Cause / Why It Matters:**
-  - **Docker Volume Lifecycle:** PostgreSQL only runs cluster initialization scripts (`initdb`, creating `POSTGRES_DB` and setting `POSTGRES_PASSWORD`) when the data volume is brand new. Subsequent edits to environment variables in `docker-compose.yml` are ignored by an existing volume.
-  - **Defensive Error Handling:** If initialization functions like `NewPostgresDB` return `(nil, err)` and callers proceed without terminating (`log.Fatalf`), deferred cleanup calls (`defer db.Close()`) dereference a `nil` pointer.
-- **How We Identified It:** Compiler/runtime error output in WSL terminal (`SQLSTATE 28P01`, `SQLSTATE 3D000`, SIGSEGV panic).
-- **Alternatives Considered:**
-  - Ignoring errors and continuing with a disconnected state (antipattern).
-  - Altering user credentials via `psql` vs resetting the volume via `docker compose down -v`.
-- **Selected Solution:**
-  1. Mapped host port `5431:5432` to avoid host conflicts and matched `DB_PORT=5431` in `.env`.
-  2. Used `log.Fatalf` in `main.go` on DB failure to enforce fail-fast semantics.
-  3. Added `if db != nil && db.Pool != nil` check inside `db.Close()`.
-  4. Used `docker compose down -v` to cleanly re-initialize the volume with matching password and database.
-- **Why We Selected It:** Ensures robust startup guarantees and prevents silent failures.
-- **Verification / Testing:** Successfully connected to `localhost:5431/taskflow_db` with `pgx/v5` connection pool.
+- **Problem / Context:** Port conflict on `5432`, missing `taskflow_db` volume state, nil pointer panic on startup failure, and password mismatch after changing compose file.
+- **Selected Solution:** Mapped host port `5431:5432`; used `log.Fatalf` in `main.go` on DB failure; added nil-check in `db.Close()`; used `docker compose down -v` to reset volume cleanly.
 
 ---
 
 ## ADR-005: Bcrypt Password Hashing with Work Factor Tuning & DTO Protection
 
 - **Category:** Architectural Decision
-- **Problem / Context:** User passwords must be stored securely to prevent credential recovery in the event of a database breach or unauthorized dump.
+- **Problem / Context:** User passwords must be stored securely to prevent credential recovery in case of data breaches.
+- **Selected Solution:** Selected bcrypt with `DefaultCost` (10), enforced `json:"-"` struct tag on `model.User.PasswordHash`, and separated database models from API DTOs.
+
+---
+
+## ADR-006: JWT Signing (HS256) & Explicit Algorithm Verification
+
+- **Category:** Architectural Decision
+- **Problem / Context:** Stateless, horizontal-scaling authentication without querying the database on every HTTP request.
+- **Selected Solution:** Implemented HS256 JWT access tokens with embedded `UserClaims` and enforced `token.Method.(*jwt.SigningMethodHMAC)` type assertion before evaluating the signature.
+
+---
+
+## ADR-007: Gin Middleware Interceptor Pattern & Context-Scoped Identity
+
+- **Category:** Architectural Decision
+- **Problem / Context:** Handlers require verified user identity without duplicating JWT parsing.
+- **Selected Solution:** Created `AuthMiddleware` checking `Authorization: Bearer <token>`, validating claims, and binding `userID`, `userEmail`, and `userRole` into `gin.Context`.
+
+---
+
+## ADR-008: Object-Level Authorization (IDOR Defense) & Role-Based Access Control (RBAC)
+
+- **Category:** Architectural Decision
+- **Problem / Context:** Prevent users from tampering with other users' tasks via URL manipulation (IDOR). Enforce administrative privileges.
+- **Selected Solution:** Enforced object ownership in SQL queries (`WHERE id = $1 AND user_id = $2`) with `tag.RowsAffected() == 0` checking. Implemented `RequireRoles` middleware for route-level RBAC returning `HTTP 403 Forbidden`.
+
+---
+
+## ADR-009: In-Memory Redis Client Initialization & Host Port Mapping
+
+- **Category:** Actually Encountered & Architectural Decision
+- **Problem / Context:** Host port `6379` already in use; need an in-memory caching client with connection pooling and startup connectivity check.
+- **Selected Solution:** Mapped host port `6378:6379` in `docker-compose.yml`, matched `REDIS_PORT=6378` in `.env`, and initialized `internal/infra/redis.go` with `PoolSize: 20` and immediate `rdb.Ping(ctx)`.
+
+---
+
+## ADR-010: Cache-Aside Caching Strategy & Invalidation via Deletion
+
+- **Category:** Architectural Decision
+- **Problem / Context:** High database read load on frequent task lookups; risks of stale or inconsistent cache data when tasks are updated or deleted.
+- **Selected Solution:** Implemented the Cache-Aside pattern in `internal/service/task_service.go`: Read from Redis $\rightarrow$ on miss query PostgreSQL and populate Redis with TTL. On update/delete, update PostgreSQL first and immediately delete (`DEL`) the Redis key. Gracefully degraded if Redis is unreachable.
+
+---
+
+## ADR-011: Distributed Redis Rate Limiting & Fail-Open Throttling
+
+- **Category:** Architectural Decision
+- **Problem / Context:** Protecting public endpoints (login/register) from brute-force password guessing and preventing API resource exhaustion across distributed server instances.
+- **Selected Solution:** Implemented `RateLimiter` middleware in `internal/middleware/rate_limit_middleware.go` using Redis `INCR` and `EXPIRE` grouped by time buckets (`unixTime / windowSec`). Identifies clients by `userID` (authenticated) or `ClientIP` (unauthenticated). Enforces "Fail Open" (logs warning and permits traffic if Redis blips). Sets standard headers (`X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`, `Retry-After`).
+
+---
+
+## ADR-012: Refresh Token Rotation (RTR), State Invalidation & Idempotent Logout
+
+- **Category:** Actually Encountered & Architectural Decision
+- **Problem / Context:** Stateless JWT access tokens cannot be revoked if stolen, but forcing users to re-login frequently hurts UX. Logout endpoint returned `200 OK` even when passed an already-deleted or tampered refresh token.
+- **Selected Solution:** Dual-token architecture (15m stateless JWT + 7d stateful Redis refresh token) with Refresh Token Rotation (RTR) on `/auth/refresh`. Kept `Logout` strictly idempotent returning `200 OK` to ensure resilient client retry semantics and prevent token probing attacks.
+
+---
+
+## ADR-013: Table-Driven Testing, Interface Mocking & In-Memory HTTP Dispatching
+
+- **Category:** Architectural Decision
+- **Problem / Context:** Need automated test coverage for domain services and HTTP middleware without creating slow, brittle dependencies on running PostgreSQL/Redis instances during unit testing.
 - **Root Cause / Why It Matters:**
-  - Fast cryptographic algorithms (SHA-256, SHA-512, MD5) can be brute-forced at rates of billions of attempts per second using consumer GPUs.
-  - Rainbow tables can instantly reverse unsalted hashes.
-  - Exposing raw models to API responses risks leaking password hashes to the client.
-- **How We Identified It:** OWASP Authentication & Password Storage Guidelines.
+  - Tests that require live databases are slow, prone to data pollution, and cannot run in isolated PR review environments easily.
+  - Writing separate test functions for every edge case leads to code duplication.
+- **How We Identified It:** Go standard testing idioms and CI/CD fast feedback requirements.
 - **Alternatives Considered:**
-  1. **SHA-256 with manual salt:** Fast, vulnerable to high-throughput GPU brute-forcing.
-  2. **PBKDF2:** Strong, but less memory-hard than modern algorithms.
-  3. **Argon2id:** State of the art, but requires more complex memory/thread tuning.
-  4. **Bcrypt (`golang.org/x/crypto/bcrypt`):** Industry standard, adaptive CPU-hard algorithm with built-in salting and configurable work factor.
-- **Selected Solution:** Selected bcrypt with `DefaultCost` (10, meaning $2^{10} = 1024$ key expansion rounds). Enforced `json:"-"` struct tag on `model.User.PasswordHash`, normalized email inputs (`strings.ToLower(strings.TrimSpace(email))`), and separated database models from API DTOs.
-- **Why We Selected It:** Built-in cryptographic salt generation prevents rainbow table lookups; tunable cost factor keeps brute-forcing computationally infeasible; explicit `json:"-"` tags protect against accidental serialization leaks.
-- **Trade-offs:** Bcrypt hashes max out at 72 bytes of password input and consume 50-100ms of CPU per hash (which is desirable for defense, but requires monitoring during high-volume registration spikes).
-- **Verification / Testing:** Verified in `auth_service.go` that passwords under 8 characters are rejected and valid passwords produce standard 60-character bcrypt hash strings.
+  1. Spinning up Docker containers for all unit tests (too slow for rapid TDD).
+  2. Manual mock structs without libraries.
+  3. `testify/mock` with table-driven tests and `net/http/httptest` for handlers/middlewares.
+- **Selected Solution:**
+  - Implemented Table-Driven Tests with `t.Run(tc.name, ...)` for all scenarios (success, edge cases, failures).
+  - Used `testify/mock` to mock `UserRepository` and `AuthService` interfaces with exact argument expectations (`mock.MatchedBy`).
+  - Used `net/http/httptest.NewRecorder()` and `router.ServeHTTP()` for in-memory HTTP middleware verification.
+- **Why We Selected It:** Tests execute in milliseconds ($<10\text{ms}$), require zero external infrastructure, provide 100% deterministic assertion of error handling branches, and decouple testing from network layers.
+- **Verification / Testing:** Executed `go test -v ./...` verifying that all service and middleware scenarios pass in $<0.75$ seconds.
+
+---
+
+## ADR-014: Integration Testing with Live PostgreSQL, Build Tags & Table Truncate Isolation
+
+- **Category:** Architectural Decision
+- **Problem / Context:** Unit tests verify isolated Go logic, but cannot verify SQL syntax errors, database-level schema constraints (foreign keys, unique indexes), or driver deserialization (`UUID`, `TIMESTAMPTZ`).
+- **Root Cause / Why It Matters:**
+  - Mocking the database can hide bugs: invalid SQL column names, failing foreign key references, or unhandled PostgreSQL error codes.
+  - Running database tests during routine `go test ./...` in development or lightweight CI environments causes failures if a live database container is not running.
+- **Alternatives Considered:**
+  1. Transaction Rollback (`tx.Rollback()` per test): Fast, but does not test real committed data or repository functions that internally use connection pools.
+  2. Mocking SQL driver (`sqlmock`): Still mocks SQL and does not test the real PostgreSQL engine or Postgres-specific extensions.
+  3. Real PostgreSQL container with Build Tags (`//go:build integration`) and `TRUNCATE TABLE ... CASCADE`: Provides 100% realistic database verification while keeping unit tests fast.
+- **Selected Solution:**
+  - Placed `//go:build integration` on all database integration test files.
+  - Used a shared `setupTestDB(t)` helper connecting to Dockerized PostgreSQL on port `5431`.
+  - Implemented cleanup teardown using `TRUNCATE TABLE tasks, users CASCADE;` inside `defer teardown()`.
+  - Created end-to-end repository tests verifying:
+    1. Schema generation of UUIDs and timestamps upon `INSERT`.
+    2. PostgreSQL error code `23505` correctly mapped to `ErrDuplicateEmail`.
+    3. PostgreSQL foreign key constraint violation when inserting orphaned tasks.
+    4. Object-level authorization (IDOR) verification in SQL (`WHERE id = $1 AND user_id = $2`) preventing cross-user reads, updates, and deletes.
+    5. Pagination and status filtering.
+- **Why We Selected It:** Guarantees that our actual SQL queries, constraints, and connection pooling work seamlessly with real PostgreSQL, while `-tags=integration` ensures standard unit tests remain instantaneous.
+- **Verification / Testing:** Ran `go test -tags=integration -v ./internal/repository/...` executing 7 comprehensive test suites in 0.528s with zero data leakage between tests.
+
+---
+
+## ADR-015: Multi-Stage Docker Build, Alpine Stripping & Docker Compose Orchestration
+
+- **Category:** Architectural Decision & Deliberately Simulated
+- **Problem / Context:** Production deployment requires a secure, minimal container image containing only runtime dependencies, along with unified local orchestration where PostgreSQL, Redis, database migrations, and the Go API run in an isolated Docker network.
+- **Root Cause / Why It Matters:**
+  - A standard Go build image (`golang:1.26-alpine`) contains compilers, package managers, and caches weighing $\sim 1\text{ GB}$, increasing attack surface and CI/CD push/pull latency.
+  - Running containers as `root` creates high vulnerability risks in case of remote code execution (container escape).
+  - Starting the API before PostgreSQL and Redis finish initializing results in startup crash-loops.
+- **Alternatives Considered:**
+  1. Single-stage container image: Simple, but huge image size ($>800\text{MB}$) and leaves development tools in production.
+  2. `scratch` base image: Extremely small, but lacks CA certificates (breaks external HTTPS requests) and has no shell for health check diagnostics.
+  3. Two-stage Alpine build (`golang:1.26-alpine` builder $\rightarrow$ `alpine:3.20` runner): Minimal footprint ($\sim 75\text{MB}$ total disk usage with certificates and non-root user).
+- **Selected Solution:**
+  - **Stage 1 (Builder):** Built statically linked binary using `CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w"`.
+  - **Stage 2 (Runner):** Alpine 3.20 base image, installed `ca-certificates` and `tzdata`, created unprivileged non-root user (`appuser:10001`), copied only the binary, and added a native `HEALTHCHECK`.
+  - **Docker Compose:** Added `api` service with `depends_on` conditions (`service_healthy` for postgres/redis and `service_completed_successfully` for migrations).
+- **Why We Selected It:** Slashes image size by $>90\%$, guarantees zero dynamic C library runtime dependencies, secures runtime permissions, and ensures zero startup race conditions between database migrations and API booting.
+- **Verification / Testing:** Built `taskflow-api:latest` successfully via `docker build -t taskflow-api:latest .` resulting in a compact 75.5MB image.
