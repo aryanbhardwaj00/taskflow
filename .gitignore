@@ -31,8 +31,3 @@ taskflow-api
 # OS specific files
 .DS_Store
 Thumbs.db
-
-# Local Interview & Study Notes (Kept local, excluded from public repository)
-TASKFLOW_PROJECT_SUMMARY.txt
-docs/interview-notes.md
-docs/learning-progress.md
