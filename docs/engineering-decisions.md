@@ -187,3 +187,47 @@ Every entry follows this standardized format:
   - **Docker Compose:** Added `api` service with `depends_on` conditions (`service_healthy` for postgres/redis and `service_completed_successfully` for migrations).
 - **Why We Selected It:** Slashes image size by $>90\%$, guarantees zero dynamic C library runtime dependencies, secures runtime permissions, and ensures zero startup race conditions between database migrations and API booting.
 - **Verification / Testing:** Built `taskflow-api:latest` successfully via `docker build -t taskflow-api:latest .` resulting in a compact 75.5MB image.
+
+---
+
+## ADR-016: GitHub Actions Automated CI/CD Pipeline & Pull Request Gates
+
+- **Category:** Architectural Decision
+- **Problem / Context:** Relying on developers to run unit tests and Docker builds manually on local machines before merging to `main` is error-prone and leads to broken deployments.
+- **Root Cause / Why It Matters:**
+  - Code that passes locally might fail on clean machines or in containers due to uncommitted files, differing local OS libraries, or cache pollution.
+  - Pull requests need automated regression verification before human code reviews.
+- **Alternatives Considered:**
+  1. Manual pre-commit verification (brittle, easily skipped).
+  2. Local git pre-push hooks (runs only on developer's machine, does not run on PRs).
+  3. GitHub Actions cloud runner pipeline triggered on `push` and `pull_request` targeting `main`.
+- **Selected Solution:**
+  - Configured `.github/workflows/ci.yml`.
+  - Step 1: `actions/setup-go@v5` caching dependencies and running `go vet` static analysis.
+  - Step 2: Running service and middleware unit tests.
+  - Step 3: Setting up Docker Buildx and executing a test build of the multi-stage Docker container.
+- **Why We Selected It:** Zero server setup, integrates natively with GitHub Pull Request UI, enforces that no code reaches `main` without passing all tests, and acts as the gatekeeper for CD deployments.
+- **Verification / Testing:** Pushed feature branch `feature-Redis`, triggered GitHub Actions in the cloud, observed both test and docker build jobs pass with green badges, and successfully executed a clean PR merge into `main`.
+
+---
+
+## ADR-017: AWS EC2 Cloud Deployment, Cross-Compilation Artifacts & Teardown Lifecycle
+
+- **Category:** Actually Encountered & Architectural Decision
+- **Problem / Context:** Deploying TaskFlow to AWS EC2 (`t3.micro`) exposed severe build slowdowns when compiling dependencies inside Docker on a single-core, 1GB RAM burstable VM (swap thrashing and CPU credit throttling).
+- **Root Cause / Why It Matters:**
+  - `t3.micro` instances have only 1 vCPU and 1 GB RAM. Building complex Go codebases inside Docker triggers memory paging to EBS swap files and exhausts burst CPU credits.
+  - Compiling directly on production servers violates the build/release/run separation principle (12-Factor App, Factor V).
+- **Alternatives Considered:**
+  1. Compiling on the server inside Docker: Too slow (8–10 minutes) and risks OOM termination on micro instances.
+  2. Upgrading to high-spec EC2 instance (`t3.large`): Incurs substantial cloud costs.
+  3. Go Cross-Compilation on developer workstation (`CGO_ENABLED=0 GOOS=linux GOARCH=amd64`) + SCP artifact delivery + minimal Alpine runner container: Builds in 3 seconds, deploys in 2 seconds.
+- **Selected Solution:**
+  - Cross-compiled static binary on host using `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w"`.
+  - Transferred binary via SSH `scp` to EC2 instance.
+  - Used minimal Alpine runner `Dockerfile` to package and run the pre-built binary.
+  - Orchestrated full stack (Postgres + Redis + API + Migrations) using Docker Compose with internal DNS resolution.
+  - Opened Security Group ingress ports `22` (SSH) and `8080` (HTTP).
+  - Decommissioned instance via `aws ec2 terminate-instances` to guarantee $0 lingering costs.
+- **Why We Selected It:** Eliminates build bottlenecks on low-spec cloud VMs, leverages Go's zero-dependency static compilation, and proves cloud orchestration end-to-end.
+- **Verification / Testing:** Hit live endpoint `http://16.178.30.160:8080/health` from external internet returning HTTP 200 OK, registered a live user with HTTP 201 Created, and verified clean instance termination.
