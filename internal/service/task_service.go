@@ -87,24 +87,25 @@ func (s *taskService) CreateTask(ctx context.Context, userID uuid.UUID, title, d
 // GetTask retrieves a single task ensuring user ownership.
 func (s *taskService) GetTask(ctx context.Context, taskID, userID uuid.UUID) (*model.Task, error) {
 	cacheKey := taskCacheKey(taskID)
-	fmt.Println("Cached Json:", cacheKey)
 
-	// Attemt to read from Redis Cache
-	cachedJson, err := s.redis.Get(ctx, cacheKey)
-	fmt.Println("Cached Json:", cachedJson)
-	if err == nil {
-		var task model.Task
-		if err := json.Unmarshal([]byte(cachedJson), &task); err == nil {
-			// Verify ownership on cached task
-			if task.UserID == userID {
-				log.Printf("CACHE HIT: retrieved task %s from Redis\n", taskID)
-				return &task, nil
+	// 1. Attempt to read from Redis Cache (if available)
+	if s.redis != nil {
+		cachedJson, err := s.redis.Get(ctx, cacheKey)
+		if err == nil {
+			var task model.Task
+			if err := json.Unmarshal([]byte(cachedJson), &task); err == nil {
+				// Verify ownership on cached task
+				if task.UserID == userID {
+					log.Printf("CACHE HIT: retrieved task %s from Redis\n", taskID)
+					return &task, nil
+				}
 			}
 		} else if !errors.Is(err, redis.Nil) {
 			// Log Redis connection error, but don't fail! Gracefully degrade to PostgreSQL.
 			log.Printf("CACHE WARNING: Redis error on Get: %v\n", err)
 		}
 	}
+
 	// 2. Cache Miss: Query PostgreSQL (Source of Truth)
 	log.Printf("CACHE MISS: querying PostgreSQL for task %s\n", taskID)
 	task, err := s.taskRepo.GetByID(ctx, taskID, userID)
@@ -112,10 +113,12 @@ func (s *taskService) GetTask(ctx context.Context, taskID, userID uuid.UUID) (*m
 		return nil, err
 	}
 
-	// 3. Populate Redis cache asynchronously or inline with TTL
-	if data, err := json.Marshal(task); err == nil {
-		if err := s.redis.Set(ctx, cacheKey, string(data), taskCacheTTL); err != nil {
-			log.Printf("CACHE WARNING: failed to cache task in Redis: %v\n", err)
+	// 3. Populate Redis cache with TTL
+	if s.redis != nil {
+		if data, err := json.Marshal(task); err == nil {
+			if err := s.redis.Set(ctx, cacheKey, string(data), taskCacheTTL); err != nil {
+				log.Printf("CACHE WARNING: failed to cache task in Redis: %v\n", err)
+			}
 		}
 	}
 
@@ -160,10 +163,12 @@ func (s *taskService) UpdateTaskStatus(
 	}
 
 	// 2. Invalidate cache: Delete key from Redis
-	if err := s.redis.Del(ctx, taskCacheKey(taskID)); err != nil {
-		log.Printf("CACHE WARNING: failed to invalidate cache for task %s: %v\n", taskID, err)
-	} else {
-		log.Printf("CACHE INVALIDATED: removed task %s from Redis\n", taskID)
+	if s.redis != nil {
+		if err := s.redis.Del(ctx, taskCacheKey(taskID)); err != nil {
+			log.Printf("CACHE WARNING: failed to invalidate cache for task %s: %v\n", taskID, err)
+		} else {
+			log.Printf("CACHE INVALIDATED: removed task %s from Redis\n", taskID)
+		}
 	}
 
 	return nil
@@ -177,10 +182,12 @@ func (s *taskService) DeleteTask(ctx context.Context, taskID, userID uuid.UUID) 
 	}
 
 	// 2. Invalidate cache: Delete key from Redis
-	if err := s.redis.Del(ctx, taskCacheKey(taskID)); err != nil {
-		log.Printf("CACHE WARNING: failed to delete cached task %s: %v\n", taskID, err)
-	} else {
-		log.Printf("CACHE INVALIDATED: removed task %s from Redis\n", taskID)
+	if s.redis != nil {
+		if err := s.redis.Del(ctx, taskCacheKey(taskID)); err != nil {
+			log.Printf("CACHE WARNING: failed to delete cached task %s: %v\n", taskID, err)
+		} else {
+			log.Printf("CACHE INVALIDATED: removed task %s from Redis\n", taskID)
+		}
 	}
 
 	return nil

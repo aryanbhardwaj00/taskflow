@@ -6,7 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// In Phase 1, we will implement a basic health check handler to verify server liveliness.
+// HealthHandler serves API health status checks.
 type HealthHandler struct{}
 
 func NewHealthHandler() *HealthHandler {

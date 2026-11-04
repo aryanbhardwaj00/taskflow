@@ -10,8 +10,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// In Phase 3, we will establish and configure the PostgreSQL connection pool using pgx.
-
 // DB wraps pgxpool.Pool to provide database connection management.
 type DB struct {
 	Pool *pgxpool.Pool

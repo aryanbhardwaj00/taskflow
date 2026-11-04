@@ -15,6 +15,12 @@ func RateLimiter(redisClient *infra.RedisClient, limit int, window time.Duration
 	return func(c *gin.Context) {
 		ctx := c.Request.Context()
 
+		// Fail open if Redis is not configured
+		if redisClient == nil || redisClient.Client == nil {
+			c.Next()
+			return
+		}
+
 		identifier := c.ClientIP()
 		if userId, err := GetUserID(c); err == nil {
 			identifier = userId.String()

@@ -231,3 +231,26 @@ Every entry follows this standardized format:
   - Decommissioned instance via `aws ec2 terminate-instances` to guarantee $0 lingering costs.
 - **Why We Selected It:** Eliminates build bottlenecks on low-spec cloud VMs, leverages Go's zero-dependency static compilation, and proves cloud orchestration end-to-end.
 - **Verification / Testing:** Hit live endpoint `http://16.178.30.160:8080/health` from external internet returning HTTP 200 OK, registered a live user with HTTP 201 Created, and verified clean instance termination.
+
+---
+
+## ADR-018: Full-Stack Test Automation, Miniredis Simulation & Codebase Sanitization
+
+- **Category:** Architectural Decision
+- **Problem / Context:** While data repositories had live PostgreSQL integration tests and the authentication service had unit tests, `TaskService`, `RateLimiter` middleware, and HTTP handlers lacked automated unit test coverage. Unused placeholder files (`logger_middleware.go`) and planning phase comments also lingered in the codebase.
+- **Root Cause / Why It Matters:**
+  - Missing tests on business and HTTP layers risk regressions when refactoring task business rules, pagination limits, or input validation.
+  - Testing Redis-backed rate limiting in CI without a live Redis server requires either brittle mocking of Redis internals or an accurate in-memory implementation.
+  - Leftover placeholder files and comments signal unfinished or prototype-level code quality.
+- **Alternatives Considered:**
+  1. Spinning up Dockerized Redis in CI for middleware tests (adds 20-30s CI startup overhead).
+  2. Manual mock structs for Redis commands (brittle and complex to maintain for `INCR`/`EXPIRE`/`TTL`).
+  3. `alicebob/miniredis/v2` in-memory engine combined with `testify/mock` and `httptest.NewRecorder`.
+- **Selected Solution:**
+  - Removed empty `internal/middleware/logger_middleware.go` and sanitized legacy phase comments across `health_handler.go` and `postgres.go`.
+  - Added unit test suites for `TaskService` (`internal/service/task_service_test.go`) covering `CreateTask`, `GetTask`, `ListTasks`, `UpdateTaskStatus`, and `DeleteTask` with `MockTaskRepository`.
+  - Added unit test suites for `RateLimiter` (`internal/middleware/rate_limit_middleware_test.go`) utilizing `alicebob/miniredis/v2` to verify quota enforcement, HTTP 429 status, RFC rate limit headers, and fail-open behavior.
+  - Added HTTP handler tests (`internal/handler/auth_handler_test.go`, `task_handler_test.go`, `health_handler_test.go`) with `httptest.NewRecorder` verifying status codes, payload binding, and route guards.
+  - Updated GitHub Actions workflow (`.github/workflows/ci.yml`) to run `./internal/handler/...` tests on every pull request and push to `main`.
+- **Why We Selected It:** Delivers complete test coverage across service, middleware, and handler layers in $<1.5$ seconds with zero external runtime dependencies.
+- **Verification / Testing:** Executed `go test -v ./internal/service/... ./internal/middleware/... ./internal/handler/...` passing all 24 unit test cases cleanly.
