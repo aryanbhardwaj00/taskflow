@@ -1,0 +1,11 @@
+# Prometheus Server Configuration for TaskFlow
+global:
+  scrape_interval: 15s     # How frequently Prometheus pulls metrics from targets
+  evaluation_interval: 15s # How frequently alert rules are evaluated
+
+scrape_configs:
+  - job_name: 'taskflow-api'
+    metrics_path: '/metrics'
+    static_configs:
+      # 'api:8080' resolves via Docker internal DNS to the TaskFlow container
+      - targets: ['api:8080']

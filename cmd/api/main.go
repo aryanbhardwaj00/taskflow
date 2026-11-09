@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/blockaryan/taskflow/internal/config"
 	"github.com/blockaryan/taskflow/internal/handler"
@@ -66,9 +67,11 @@ func main() {
 	router := gin.New()
 	router.Use(gin.Logger())
 	router.Use(gin.Recovery())
+	router.Use(middleware.PrometheusMetrics()) // Intercept all requests for Prometheus metrics
 
 	// 9. Register Routes
 	router.GET("/health", healthHandler.HealthCheck)
+	router.GET("/metrics", gin.WrapH(promhttp.Handler())) // Expose Prometheus metrics endpoint
 
 	v1 := router.Group("/api/v1")
 	{

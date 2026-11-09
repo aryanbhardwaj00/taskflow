@@ -8,6 +8,9 @@
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791?style=flat-square&logo=postgresql)](https://www.postgresql.org)
 [![Redis](https://img.shields.io/badge/Redis-7-DC382D?style=flat-square&logo=redis)](https://redis.io)
 [![Docker](https://img.shields.io/badge/Docker-Multi--Stage-2496ED?style=flat-square&logo=docker)](https://www.docker.com)
+[![Kubernetes](https://img.shields.io/badge/Kubernetes-Orchestrated-326CE5?style=flat-square&logo=kubernetes)](https://kubernetes.io)
+[![Prometheus](https://img.shields.io/badge/Prometheus-Monitoring-E6522C?style=flat-square&logo=prometheus)](https://prometheus.io)
+[![Grafana](https://img.shields.io/badge/Grafana-Dashboards-F46800?style=flat-square&logo=grafana)](https://grafana.com)
 [![CI Pipeline](https://img.shields.io/badge/CI-GitHub_Actions-2088FF?style=flat-square&logo=githubactions)](https://github.com)
 [![AWS](https://img.shields.io/badge/AWS-EC2_Deployed-FF9900?style=flat-square&logo=amazonwebservices)](https://aws.amazon.com)
 
@@ -79,6 +82,17 @@ TaskFlow enforces strict separation of concerns using **Layered Clean Architectu
 - **Defense in Depth:** Container executes under an unprivileged non-root user (`appuser:10001`).
 - **Automated CI:** GitHub Actions workflow executes `go vet`, table-driven unit tests, and Docker container verification on every Pull Request.
 
+### 6. Full-Stack Observability (Prometheus & Grafana)
+- **Golden Signals Instrumentation:** Custom Gin middleware measuring request rates (`http_requests_total`), latency distribution (`http_request_duration_seconds` histogram), and active concurrency (`http_requests_in_flight` gauge).
+- **Cardinality Explosion Defense:** Leverages `c.FullPath()` to record parameterized routes (`/api/v1/tasks/:id`) instead of raw UUIDs, preventing time-series memory bloat.
+- **Zero-Config Visualization:** Automated Grafana provisioning on port `3000` with pre-wired Prometheus data source on port `9090`.
+
+### 7. Cloud-Native Kubernetes Orchestration (`k8s/`)
+- **Self-Healing Deployments:** Replicated Pods (`replicas: 2`) with autonomous recovery within seconds upon failure.
+- **Zero-Downtime Rolling Updates:** Dual probes (`readinessProbe` & `livenessProbe`) testing `/health` ensure traffic is only routed to fully initialized instances.
+- **Decoupled Service Discovery:** `ClusterIP` and `NodePort` abstraction layers routing traffic seamlessly across dynamic, ephemeral Pod IPs.
+- **Noisy Neighbor Defense:** Explicit CPU and memory resource requests (`50m / 64Mi`) and limits (`200m / 128Mi`).
+
 ---
 
 ## 📁 Project Structure
@@ -87,18 +101,21 @@ TaskFlow enforces strict separation of concerns using **Layered Clean Architectu
 .
 ├── cmd/
 │   └── api/                    # Application entry point (main.go), server timeouts & graceful shutdown
+├── grafana/                    # Automated Grafana datasource provisioning
 ├── internal/
 │   ├── config/                 # 12-Factor App environment configuration & startup validation
 │   ├── handler/                # HTTP transport handlers & JSON DTO binding
 │   ├── infra/                  # Infrastructure drivers (pgxpool PostgreSQL, go-redis)
-│   ├── middleware/             # Gin middlewares (Auth, RateLimiter, RBAC)
+│   ├── middleware/             # Gin middlewares (Auth, RateLimiter, RBAC, Prometheus metrics)
 │   ├── model/                  # Domain entities (User, Task) and typed constants
 │   ├── repository/             # Data access interfaces & PostgreSQL implementations
 │   └── service/                # Business logic, cache-aside management & token rotation
+├── k8s/                        # Kubernetes manifests (Deployments, Services, Configs)
 ├── migrations/                 # Idempotent versioned SQL migration scripts
 ├── .github/workflows/          # GitHub Actions CI pipeline
 ├── docker-compose.yml          # Local multi-service orchestration with health-checks
 ├── Dockerfile                  # Production multi-stage Alpine build
+├── prometheus.yml              # Prometheus scrape configuration
 └── docs/                       # Architecture Decision Records (ADRs)
 ```
 
@@ -124,10 +141,43 @@ This single command:
 2. Provisions **Redis 7** with health check probes.
 3. Executes automated **SQL migrations** via `golang-migrate`.
 4. Compiles and starts the **TaskFlow Go API** on `http://localhost:8080`.
+5. Starts **Prometheus** on `http://localhost:9090` (scraping metrics every 15s).
+6. Starts **Grafana** on `http://localhost:3000` (pre-provisioned with Prometheus).
 
-### 3. Verify Health
+### 3. Verify Health & Observability
 ```bash
+# Verify API liveliness
 curl -i http://localhost:8080/health
+
+# Verify Prometheus metrics export
+curl -s http://localhost:8080/metrics | grep http_requests
+
+# Open Grafana Dashboards
+# http://localhost:3000 (User: admin / Pass: admin)
+```
+
+---
+
+## ☸️ Kubernetes Deployment (Local Minikube)
+
+TaskFlow is production-ready for deployment to Kubernetes:
+
+```bash
+# 1. Start local cluster
+minikube start --driver=docker
+
+# 2. Sync local Docker image
+minikube image load taskflow-api:latest
+
+# 3. Apply all manifests
+kubectl apply -f k8s/
+
+# 4. Verify self-healing pods & services
+kubectl get pods -w
+kubectl get svc
+
+# 5. Port-forward to access the cluster
+kubectl port-forward svc/taskflow-api 8080:8080
 ```
 
 ---

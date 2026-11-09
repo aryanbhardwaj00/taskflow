@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: taskflow-api
+  labels:
+    app: taskflow-api
+spec:
+  # NodePort allows us to access the Service from outside the minikube cluster
+  type: NodePort
+  selector:
+    # Routes incoming traffic to any Pod that has the label: app: taskflow-api
+    app: taskflow-api
+  ports:
+    - protocol: TCP
+      port: 8080        # Port the Service listens on internally inside Kubernetes
+      targetPort: 8080  # Port inside the TaskFlow container

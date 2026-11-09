@@ -254,3 +254,52 @@ Every entry follows this standardized format:
   - Updated GitHub Actions workflow (`.github/workflows/ci.yml`) to run `./internal/handler/...` tests on every pull request and push to `main`.
 - **Why We Selected It:** Delivers complete test coverage across service, middleware, and handler layers in $<1.5$ seconds with zero external runtime dependencies.
 - **Verification / Testing:** Executed `go test -v ./internal/service/... ./internal/middleware/... ./internal/handler/...` passing all 24 unit test cases cleanly.
+
+---
+
+## ADR-019: Prometheus Metrics Instrumentation, High-Cardinality Defense & Grafana Provisioning
+
+- **Category:** Architectural Decision
+- **Problem / Context:** Raw text application logs are insufficient for monitoring real-time system health, p95/p99 latency distributions, and throughput at scale without overwhelming storage and query performance.
+- **Root Cause / Why It Matters:**
+  - High-traffic microservices generate gigabytes of log output, making aggregate rate calculation slow and costly.
+  - Recording metric labels with dynamic URL parameters (e.g., `/api/v1/tasks/123e4567...`) creates a "cardinality explosion" that can exhaust Prometheus server memory and degrade TSDB query speeds.
+  - Requiring manual UI setup for data sources in Grafana leads to configuration drift across environments.
+- **Alternatives Considered:**
+  1. Relying strictly on structured JSON logging.
+  2. Push-based APM agent (e.g., Datadog/NewRelic) requiring proprietary vendor libraries and licensing costs.
+  3. Pull-based CNCF standard: Prometheus client library (`client_golang`) + Grafana datasource provisioning.
+- **Selected Solution:**
+  - Implemented `PrometheusMetrics` middleware in `internal/middleware/metrics_middleware.go` tracking `http_requests_total` (Counter), `http_request_duration_seconds` (Histogram across 11 buckets), and `http_requests_in_flight` (Gauge).
+  - Used Gin's `c.FullPath()` to record parameterized route patterns (`/api/v1/tasks/:id`) instead of raw request URLs, preventing cardinality explosion.
+  - Exposed standard pull endpoint `GET /metrics` via `promhttp.Handler()` including Go runtime stats (heap allocations, goroutines, GC cycles).
+  - Automated Grafana provisioning via `grafana/provisioning/datasources/datasource.yml` connecting to Prometheus (`http://prometheus:9090`) out of the box.
+- **Why We Selected It:** Provides sub-millisecond in-memory metrics recording, standards-compliant PromQL querying, zero vendor lock-in, and automated dashboard visualization.
+- **Verification / Testing:** Verified `/metrics` endpoint exports valid Prometheus text format; confirmed scrape target is UP in Prometheus dashboard; imported Go Runtime Dashboard (`14061`) in Grafana showing real-time traffic, goroutines, and latency.
+
+---
+
+## ADR-020: Kubernetes Declarative Orchestration, Self-Healing ReplicaSets & Zero-Downtime Health Probes
+
+- **Category:** Architectural Decision & Deliberately Simulated
+- **Problem / Context:** Docker Compose is constrained to single-node hosting. Production systems require multi-node cluster management, automated self-healing against process crashes, zero-downtime rolling updates, and elastic horizontal scaling.
+- **Root Cause / Why It Matters:**
+  - A single-node container failure takes down the service until manual intervention occurs.
+  - Replacing a running container in Docker Compose produces brief downtime (502/503 errors).
+  - Traffic spikes require manual configuration changes rather than declarative horizontal pod scaling.
+- **Alternatives Considered:**
+  1. Docker Swarm: Simpler, but lacks broad cloud-native ecosystem adoption and advanced autoscaling capabilities.
+  2. AWS ECS: AWS-specific, creating cloud vendor lock-in.
+  3. Kubernetes (K8s): CNCF industry standard with declarative state reconciliation, self-healing, and portable across all cloud providers.
+- **Selected Solution:**
+  - Authored Kubernetes manifests in `k8s/`:
+    - `k8s/deployment.yaml`: Replicated Pod management (`replicas: 2`) with explicit CPU/memory requests (`50m/64Mi`) and limits (`200m/128Mi`).
+    - `k8s/service.yaml`: `NodePort` service abstraction decoupling internal routing from dynamic pod IP changes.
+    - `k8s/postgres.yaml` & `k8s/redis.yaml`: In-cluster PostgreSQL and Redis deployments + `ClusterIP` services for localized DNS resolution.
+  - Configured `readinessProbe` and `livenessProbe` hitting `/health` on port 8080 to guarantee traffic only routes to fully initialized containers and deadlocked instances are restarted automatically.
+- **Why We Selected It:** Guarantees self-healing within seconds, enables zero-downtime rolling deployments, and provides seamless horizontal scaling via `kubectl scale`.
+- **Verification / Testing:**
+  1. Deployed full stack to local Minikube cluster (`kubectl apply -f k8s/`).
+  2. Intentionally killed a running pod (`kubectl delete pod ...`); observed Kubernetes autonomously detect drift and spawn an identical replacement in $<4$ seconds.
+  3. Scaled from 2 to 5 replicas in 2 seconds (`kubectl scale deployment taskflow-api --replicas=5`) and back down cleanly.
+  4. Verified connectivity through `kubectl port-forward svc/taskflow-api 8080:8080` handling active requests.

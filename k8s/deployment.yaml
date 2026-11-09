@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: taskflow-api
+  labels:
+    app: taskflow-api
+spec:
+  # Desired State: Always keep 2 identical copies of TaskFlow API running
+  replicas: 2
+  selector:
+    matchLabels:
+      app: taskflow-api
+  template:
+    metadata:
+      labels:
+        app: taskflow-api
+    spec:
+      containers:
+        - name: taskflow-api
+          image: taskflow-api:latest
+          # Never pull from Docker Hub if the image exists locally inside minikube
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: APP_ENV
+              value: "production"
+            - name: HTTP_PORT
+              value: "8080"
+            - name: DB_HOST
+              value: "postgres"
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_USER
+              value: "postgres"
+            - name: DB_PASSWORD
+              value: "postgres123"
+            - name: DB_NAME
+              value: "taskflow_db"
+            - name: DB_SSLMODE
+              value: "disable"
+            - name: REDIS_HOST
+              value: "redis"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: JWT_SECRET
+              value: "supersecretproductionkeychangeme_32bytes_long"
+            - name: JWT_EXPIRATION_HOURS
+              value: "24"
+          # Readiness Probe: Only send traffic once the API returns HTTP 200 on /health
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          # Liveness Probe: If the server freezes or deadlocks, restart the container
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          # Resource Requests & Limits: Prevent noisy neighbors from hogging cluster memory
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
